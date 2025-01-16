@@ -1,5 +1,5 @@
-[![Logo Light](https://raw.githubusercontent.com/odigos-io/.github/refs/heads/main/profile/logo_light.svg#gh-dark-mode-only)](https://odigos.io/)
-[![Logo Dark](https://raw.githubusercontent.com/odigos-io/.github/refs/heads/main/profile/logo_dark.svg#gh-light-mode-only)](https://odigos.io/)
+[![Logo Light](https://raw.githubusercontent.com/odigos-io/.github/refs/heads/main/profile/logo_light.svg#gh-dark-mode-only)](https://odigos.io#gh-dark-mode-only)
+[![Logo Dark](https://raw.githubusercontent.com/odigos-io/.github/refs/heads/main/profile/logo_dark.svg#gh-light-mode-only)](https://odigos.io#gh-light-mode-only)
 
 ## Unlock Deeper Observability
 
