@@ -1,5 +1,5 @@
 <a href="https://odigos.io/">
-  <img src="https://odigos.io/images/logo/text-logo.svg" alt="logo" height="69">
+  <img src="./logo.svg" alt="logo" height="69">
 </a>
 
 ## Unlock Deeper Observability
