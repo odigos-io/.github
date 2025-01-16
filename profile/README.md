@@ -1,6 +1,4 @@
-<a href="https://odigos.io/">
-  <img src="./logo.svg" alt="logo" height="69">
-</a>
+[![Logo SVG](https://raw.githubusercontent.com/odigos-io/.github/refs/heads/main/profile/logo.svg)](https://odigos.io/)
 
 ## Unlock Deeper Observability
 
