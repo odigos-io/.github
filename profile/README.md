@@ -1,4 +1,5 @@
-[![Logo SVG](https://raw.githubusercontent.com/odigos-io/.github/refs/heads/main/profile/logo.svg)](https://odigos.io/)
+[![Logo Light](https://raw.githubusercontent.com/odigos-io/.github/refs/heads/main/profile/logo_light.svg#gh-dark-mode-only)](https://odigos.io/)
+[![Logo Dark](https://raw.githubusercontent.com/odigos-io/.github/refs/heads/main/profile/logo_dark.svg#gh-light-mode-only)](https://odigos.io/)
 
 ## Unlock Deeper Observability
 
