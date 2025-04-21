@@ -23,6 +23,7 @@ Enterprise-Grade OpenTelemetry for superior application performance monitoring.
 [![Node.js](https://img.shields.io/badge/Node.js-111?logo=node.js)](https://docs.odigos.io/instrumentations/nodejs)
 [![Python](https://img.shields.io/badge/Python-111?logo=python)](https://docs.odigos.io/instrumentations/python)
 [![.NET](https://img.shields.io/badge/.NET-111?logo=dotnet)](https://docs.odigos.io/instrumentations/dotnet)
+![PHP](https://img.shields.io/badge/PHP-111?logo=php)
 
 #### 3. Connect to a Supported Backend:
 
