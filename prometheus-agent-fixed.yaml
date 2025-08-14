@@ -1,0 +1,254 @@
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: PrometheusAgent
+metadata:
+  name: cluster-agent
+  namespace: monitoring
+spec:
+  serviceAccountName: prometheus-agent
+  serviceMonitorSelector:
+    matchLabels:
+      release: prometheus-agent   # 👈 matches our custom ServiceMonitor
+  podMonitorSelector:
+    matchLabels:
+      release: prometheus-agent
+  serviceMonitorNamespaceSelector: {}
+  podMonitorNamespaceSelector: {}
+  probeSelector: {}
+  externalLabels:
+    cluster: "stress-tests-eks"
+    region: "us-west-2"
+  scrapeInterval: 15s
+  # Resources configuration to prevent OOM issues
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "100m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+  # Storage configuration for agent mode
+  storage:
+    emptyDir:
+      sizeLimit: 10Gi
+  remoteWrite:
+  - url: "http://10.0.3.115:9090/api/v1/write"
+    # Queue configuration to prevent memory issues
+    queueConfig:
+      capacity: 10000
+      maxShards: 100
+      minShards: 1
+      maxSamplesPerSend: 2000
+      batchSendDeadline: 5s
+    writeRelabelConfigs:
+      # Add cluster label to all metrics
+      - targetLabel: cluster
+        replacement: "stress-tests-eks"
+
+      # Copy exported_namespace to namespace for all metrics (only if exported_namespace exists)
+      - sourceLabels: [exported_namespace]
+        targetLabel: namespace
+        action: replace
+        regex: '(.+)'
+
+      # Drop namespace for odigos metrics
+      - sourceLabels: [__name__]
+        regex: 'odigos_.*'
+        targetLabel: namespace
+        replacement: ""
+        action: replace
+
+      # Normalize kube-state-metrics job label (only for kube-state-metrics job)
+      - sourceLabels: [job]
+        regex: 'kube-state-metrics.*'
+        targetLabel: job
+        replacement: 'kube-state-metrics'
+        action: replace
+
+---
+# ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus-agent
+  namespace: monitoring
+---
+# ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-agent-scrape
+rules:
+  # Core discovery
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/proxy
+      - services
+      - endpoints
+      - pods
+      - namespaces
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: [""]
+    resources:
+      - nodes/proxy
+    verbs: ["get", "list", "watch"]
+  # Ingress discovery
+  - apiGroups: ["extensions", "networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch"]
+
+  # Kubelet metrics access
+  - apiGroups: [""]
+    resources:
+      - nodes/metrics
+      - nodes/stats
+      - nodes/log
+      - nodes/spec
+    verbs: ["get", "list", "watch"]
+
+  - nonResourceURLs:
+      - /metrics
+      - /metrics/cadvisor
+      - /metrics/resource
+    verbs: ["get"]
+
+  # Monitoring CRDs
+  - apiGroups: ["monitoring.coreos.com"]
+    resources:
+      - servicemonitors
+      - podmonitors
+      - prometheusrules
+      - probes
+    verbs: ["get", "list", "watch"]
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-agent-scrape
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-agent-scrape
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-agent
+    namespace: monitoring
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kubelet-metrics
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      k8s-app: kubelet
+  namespaceSelector:
+    matchNames:
+      - kube-system
+  endpoints:
+    - port: https-metrics
+      scheme: https
+      interval: 15s
+      path: /metrics
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: true
+      # Add relabel configs to handle kubelet metrics properly
+      relabelConfigs:
+        - sourceLabels: [__address__]
+          regex: '([^:]+)(?::\d+)?'
+          targetLabel: __address__
+          replacement: '${1}:10250'
+
+    - port: https-metrics
+      path: /metrics/cadvisor
+      scheme: https
+      interval: 15s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: true
+      relabelConfigs:
+        - sourceLabels: [__address__]
+          regex: '([^:]+)(?::\d+)?'
+          targetLabel: __address__
+          replacement: '${1}:10250'
+
+    - port: https-metrics
+      path: /metrics/resource
+      scheme: https
+      interval: 15s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: true
+      relabelConfigs:
+        - sourceLabels: [__address__]
+          regex: '([^:]+)(?::\d+)?'
+          targetLabel: __address__
+          replacement: '${1}:10250'
+
+---
+# ServiceMonitor for kube-state-metrics (REQUIRED for resource requests)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+  namespaceSelector:
+    matchNames:
+      - kube-system  # or wherever kube-state-metrics is deployed
+  endpoints:
+    - port: http-metrics
+      interval: 15s
+      path: /metrics
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: node-exporter-pods
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-node-exporter
+  namespaceSelector:
+    matchNames:
+      - monitoring
+  podMetricsEndpoints:
+    - port: http-metrics
+      interval: 15s
+      path: /metrics
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: odigos-system-metrics
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      odigos.io/system-object: "true"
+  namespaceSelector:
+    matchNames:
+      - odigos-system
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
