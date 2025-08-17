@@ -1,0 +1,337 @@
+# Prometheus Agent
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: PrometheusAgent
+metadata:
+  name: cluster-agent
+  namespace: monitoring
+spec:
+  serviceAccountName: prometheus-agent
+  serviceMonitorSelector:
+    matchLabels:
+      release: prometheus-agent
+  podMonitorSelector:
+    matchLabels:
+      release: prometheus-agent
+  serviceMonitorNamespaceSelector: {}
+  podMonitorNamespaceSelector: {}
+  probeSelector:
+    matchLabels:
+      release: prometheus-agent
+  scrapeInterval: 15s
+  remoteWrite:
+  - url: "http://10.0.3.115:9090/api/v1/write"
+    writeRelabelConfigs:
+      # Add cluster label
+      - targetLabel: cluster
+        replacement: "stress-tests-eks"
+
+      # Handle exported_* labels from kube-state-metrics
+      - sourceLabels: [exported_namespace]
+        targetLabel: namespace
+        action: replace
+      - sourceLabels: [exported_pod]
+        targetLabel: pod
+        action: replace  
+      - sourceLabels: [exported_container]
+        targetLabel: container
+        action: replace
+      - regex: "exported_.*"
+        action: labeldrop
+
+      # Normalize job names for consistency
+      - sourceLabels: [job]
+        regex: "kubelet"
+        targetLabel: job
+        replacement: "kubernetes-metrics"
+
+      - sourceLabels: [job] 
+        regex: "kube-state-metrics"
+        targetLabel: job
+        replacement: "kubernetes-metrics"
+
+      - sourceLabels: [job]
+        regex: "monitoring/node-exporter-pods"
+        targetLabel: job
+        replacement: "node-exporter"
+
+---
+# ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus-agent
+  namespace: monitoring
+
+---
+# ClusterRole - Enhanced permissions for better metric collection
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-agent-scrape
+rules:
+  - apiGroups: [""]
+    resources: [nodes, nodes/proxy, services, endpoints, pods, namespaces, configmaps]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: [nodes/metrics, nodes/stats, nodes/log, nodes/spec, nodes/proxy/stats/summary]
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs:
+      - /metrics
+      - /metrics/cadvisor
+      - /metrics/resource
+      - /stats/summary
+    verbs: ["get"]
+  - apiGroups: ["extensions", "networking.k8s.io"]
+    resources: [ingresses]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: [servicemonitors, podmonitors, prometheusrules, probes]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: [deployments, replicasets, daemonsets, statefulsets]
+    verbs: ["get", "list", "watch"]
+
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-agent-scrape
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-agent-scrape
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-agent
+    namespace: monitoring
+
+---
+
+# ServiceMonitor for kubelet + cadvisor + resource - FIXED VERSION
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kubelet-metrics
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      k8s-app: kubelet
+  namespaceSelector:
+    matchNames: [kube-system]
+  endpoints:
+
+    # cAdvisor metrics - FIXED approach with proper label handling
+    - port: https-metrics
+      path: /metrics/cadvisor
+      scheme: https
+      interval: 15s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig: { insecureSkipVerify: true }
+      metricRelabelings:
+      # Keep container metrics but be more selective
+      - sourceLabels: [__name__]
+        regex: 'container_(cpu|memory|network|fs)_.*'
+        action: keep
+        
+      # Keep only metrics that have container info (exclude pause containers and system containers)
+      - sourceLabels: [container]
+        regex: '^$|POD'
+        action: drop
+        
+      # Keep only metrics with actual pod names (not empty)
+      - sourceLabels: [pod]
+        regex: '^$'
+        action: drop
+        
+      # Ensure we have namespace information
+      - sourceLabels: [namespace]
+        regex: '^$'
+        action: drop
+
+      # The key fix: cAdvisor in recent Kubernetes versions provides these labels directly
+      # No need for complex relabeling from container_label_* as the labels should be present
+      
+      # Clean up any remaining container_label_* labels if they exist
+      - regex: 'container_label_.*'
+        action: labeldrop
+        
+      # Clean up other unnecessary labels
+      - regex: 'id|name|image_id'
+        action: labeldrop
+
+    # Kubelet metrics endpoint  
+    - port: https-metrics
+      path: /metrics
+      scheme: https
+      interval: 15s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig: { insecureSkipVerify: true }
+      metricRelabelings:
+      # Keep only kubelet-specific metrics
+      - sourceLabels: [__name__]
+        regex: 'kubelet_.*|kubernetes_.*'
+        action: keep
+
+    # Resource metrics endpoint
+    - port: https-metrics  
+      path: /metrics/resource
+      scheme: https
+      interval: 15s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig: { insecureSkipVerify: true }
+
+---
+# ServiceMonitor for kube-state-metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+  namespaceSelector:
+    matchNames: [kube-system]
+  endpoints:
+    - port: http
+      interval: 15s
+      path: /metrics
+
+---
+# PodMonitor for node-exporter
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: node-exporter-pods
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-node-exporter
+  namespaceSelector:
+    matchNames: [monitoring]
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+
+---
+# ServiceMonitor for API server
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: apiserver
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      component: apiserver
+  namespaceSelector:
+    matchNames: [default, kube-system]
+  endpoints:
+    - port: https
+      scheme: https
+      interval: 15s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        caFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        insecureSkipVerify: false
+
+---
+# ServiceMonitor for Odigos services
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: odigos-system
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      odigos.io/system-object: "true"
+  namespaceSelector:
+    matchNames:
+      - odigos-system
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+
+---
+# Improved PrometheusRule with better error handling
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: pod-enriched-metrics
+  namespace: monitoring
+spec:
+  groups:
+  - name: pod-enriched.rules
+    interval: 30s
+    rules:
+    # Basic container CPU usage rate
+    - record: container_cpu_usage_rate
+      expr: |
+        rate(container_cpu_usage_seconds_total{container!="",pod!="",namespace!=""}[5m])
+    
+    # CPU usage with pod info enrichment (if needed)
+    - record: container_cpu_usage_seconds_total:enriched
+      expr: |
+        sum by (namespace, pod, container, cluster, node) (
+          rate(container_cpu_usage_seconds_total{container!="",pod!="",namespace!="",image!=""}[5m])
+        )
+    
+    # CPU utilization percentage
+    - record: container_cpu_utilization
+      expr: |
+        (
+          rate(container_cpu_usage_seconds_total{container!="",pod!="",namespace!=""}[5m])
+          / 
+          on(namespace, pod, container) kube_pod_container_resource_limits{resource="cpu"}
+        ) * 100
+
+---
+# Additional ServiceMonitor to verify kubelet service discovery
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kubelet-service-discovery
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  # This targets the kubelet service directly in kube-system
+  selector: {}
+  namespaceSelector:
+    matchNames: [kube-system]
+  endpoints:
+  - port: https-metrics
+    path: /metrics/cadvisor
+    scheme: https
+    interval: 15s
+    bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+    tlsConfig: 
+      insecureSkipVerify: true
+    # Alternative approach using kubernetes_sd_configs-like behavior
+    metricRelabelings:
+    - sourceLabels: [__name__]
+      regex: 'container_cpu_usage_seconds_total|container_memory_usage_bytes|container_network_.*'
+      action: keep
+    - sourceLabels: [container]
+      regex: '^$|POD'
+      action: drop
+    - sourceLabels: [pod]
+      regex: '^$'
+      action: drop
