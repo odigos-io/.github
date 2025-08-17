@@ -1,0 +1,131 @@
+# EKS-Optimized ServiceMonitor for kubelet metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kubelet-metrics
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      k8s-app: kubelet
+  namespaceSelector:
+    matchNames: [kube-system]
+  endpoints:
+
+    # cAdvisor metrics - Simplified approach for EKS
+    - port: https-metrics
+      path: /metrics/cadvisor
+      scheme: https
+      interval: 15s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig: { insecureSkipVerify: true }
+      metricRelabelings:
+      # Keep all container metrics - let Prometheus rules handle the enrichment
+      - sourceLabels: [__name__]
+        regex: 'container_(cpu_usage_seconds_total|memory_usage_bytes|memory_working_set_bytes|fs_usage_bytes|network_.*)'
+        action: keep
+        
+      # Only keep metrics that have actual container names (not empty, not POD)
+      - sourceLabels: [container]
+        regex: '^$|POD'
+        action: drop
+
+    # Kubelet metrics endpoint  
+    - port: https-metrics
+      path: /metrics
+      scheme: https
+      interval: 15s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig: { insecureSkipVerify: true }
+
+    # Resource metrics endpoint
+    - port: https-metrics  
+      path: /metrics/resource
+      scheme: https
+      interval: 15s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig: { insecureSkipVerify: true }
+
+---
+# Enhanced PrometheusRule for EKS container metrics enrichment
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: eks-container-enrichment
+  namespace: monitoring
+spec:
+  groups:
+  - name: eks-container-enrichment.rules
+    interval: 15s
+    rules:
+    
+    # Create enriched CPU metrics with pod information
+    - record: container_cpu_usage_rate:enriched
+      expr: |
+        (
+          rate(container_cpu_usage_seconds_total{container!="",container!="POD",image!=""}[5m])
+          * on (pod, namespace) group_left(uid, node, created_by_kind, created_by_name, pod_ip)
+            kube_pod_info{}
+        )
+        
+    # Create enriched memory metrics  
+    - record: container_memory_usage_bytes:enriched
+      expr: |
+        (
+          container_memory_usage_bytes{container!="",container!="POD",image!=""}
+          * on (pod, namespace) group_left(uid, node, created_by_kind, created_by_name, pod_ip)
+            kube_pod_info{}
+        )
+        
+    # Working set memory (more accurate for limits)
+    - record: container_memory_working_set_bytes:enriched
+      expr: |
+        (
+          container_memory_working_set_bytes{container!="",container!="POD",image!=""}
+          * on (pod, namespace) group_left(uid, node, created_by_kind, created_by_name, pod_ip)
+            kube_pod_info{}
+        )
+
+    # Network metrics
+    - record: container_network_receive_bytes_total:enriched
+      expr: |
+        (
+          rate(container_network_receive_bytes_total{container!="",container!="POD"}[5m])
+          * on (pod, namespace) group_left(uid, node, created_by_kind, created_by_name, pod_ip)
+            kube_pod_info{}
+        )
+        
+    - record: container_network_transmit_bytes_total:enriched
+      expr: |
+        (
+          rate(container_network_transmit_bytes_total{container!="",container!="POD"}[5m])
+          * on (pod, namespace) group_left(uid, node, created_by_kind, created_by_name, pod_ip)
+            kube_pod_info{}
+        )
+
+---
+# Ensure kube-state-metrics is properly configured
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kube-state-metrics-enhanced
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+  namespaceSelector:
+    matchNames: [kube-system]
+  endpoints:
+    - port: http
+      interval: 15s
+      path: /metrics
+      metricRelabelings:
+      # Ensure we keep pod info metrics
+      - sourceLabels: [__name__]
+        regex: 'kube_pod_info|kube_pod_container_info|kube_pod_status_.*'
+        action: keep

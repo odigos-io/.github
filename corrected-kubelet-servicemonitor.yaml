@@ -1,0 +1,127 @@
+# ServiceMonitor for kubelet + cadvisor + resource - CORRECTED FOR EKS
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kubelet-metrics
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      k8s-app: kubelet
+  namespaceSelector:
+    matchNames: [kube-system]
+  endpoints:
+
+    # cAdvisor metrics - EKS compatible configuration
+    - port: https-metrics
+      path: /metrics/cadvisor
+      scheme: https
+      interval: 15s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig: { insecureSkipVerify: true }
+      metricRelabelings:
+      # Keep container metrics that have actual container information
+      - sourceLabels: [__name__]
+        regex: 'container_.*'
+        action: keep
+        
+      # Drop system containers and pause containers that don't have useful pod info
+      - sourceLabels: [id]
+        regex: '/|/system.slice.*|/user.slice.*'
+        action: drop
+        
+      # Keep only containers that have pod information
+      - sourceLabels: [id]
+        regex: '/kubepods.slice/kubepods-[^/]+.slice/kubepods-[^/]+-pod[^/]+.slice/.*'
+        action: keep
+        
+      # Extract pod UID from the cgroup path for EKS
+      - sourceLabels: [id]
+        regex: '/kubepods.slice/kubepods-[^/]+.slice/kubepods-[^/]+-pod([^/]+).slice/.*'
+        targetLabel: pod_uid
+        replacement: '${1}'
+        action: replace
+        
+      # Replace underscores with dashes in pod_uid to match kube_pod_info
+      - sourceLabels: [pod_uid]
+        regex: '(.*)_(.*)_(.*)_(.*)_(.*)' 
+        targetLabel: pod_uid
+        replacement: '${1}-${2}-${3}-${4}-${5}'
+        action: replace
+
+    # Kubelet metrics endpoint  
+    - port: https-metrics
+      path: /metrics
+      scheme: https
+      interval: 15s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig: { insecureSkipVerify: true }
+
+    # Resource metrics endpoint
+    - port: https-metrics  
+      path: /metrics/resource
+      scheme: https
+      interval: 15s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig: { insecureSkipVerify: true }
+
+---
+# Updated PrometheusRule for proper pod enrichment
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: pod-enriched-metrics
+  namespace: monitoring
+spec:
+  groups:
+  - name: pod-enriched.rules
+    interval: 30s
+    rules:
+    # Enrich container metrics with pod information using pod_uid
+    - record: container_cpu_usage_seconds_total:enriched
+      expr: |
+        sum by (namespace, pod, container, cluster, node) (
+          rate(container_cpu_usage_seconds_total{container!="POD",container!="",image!=""}[5m])
+          * on (pod_uid) group_left(namespace, pod)
+            (kube_pod_info{} * on (uid) group_left() kube_pod_info{})
+        )
+        
+    - record: container_memory_usage_bytes:enriched  
+      expr: |
+        sum by (namespace, pod, container, cluster, node) (
+          container_memory_usage_bytes{container!="POD",container!="",image!=""}
+          * on (pod_uid) group_left(namespace, pod)
+            (kube_pod_info{} * on (uid) group_left() kube_pod_info{})
+        )
+
+---
+# Alternative approach: Use kube-state-metrics join
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule  
+metadata:
+  name: container-pod-join
+  namespace: monitoring
+spec:
+  groups:
+  - name: container-pod-join.rules
+    interval: 30s
+    rules:
+    # Create a mapping between container cgroup and pod info
+    - record: container_pod_mapping
+      expr: |
+        kube_pod_container_info 
+        * on (namespace, pod) group_left(uid, node, created_by_kind, created_by_name)
+          kube_pod_info
+          
+    # Join container metrics with pod information using container name and node
+    - record: container_cpu_usage_seconds_total:with_pod_info
+      expr: |
+        rate(container_cpu_usage_seconds_total{container!="POD",container!="",image!=""}[5m])
+        * on (container, node) group_left(namespace, pod, uid)
+          (
+            container_pod_mapping{container!=""}
+            * on (container, pod, namespace) group_left()
+              kube_pod_container_info
+          )
