@@ -1,0 +1,124 @@
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: PrometheusAgent
+metadata:
+  name: cluster-agent
+  namespace: monitoring
+spec:
+  serviceAccountName: prometheus-agent
+  # Start with minimal selectors
+  serviceMonitorSelector:
+    matchLabels:
+      release: prometheus-agent
+  podMonitorSelector: {}
+  serviceMonitorNamespaceSelector: {}
+  podMonitorNamespaceSelector: {}
+  probeSelector: {}
+  
+  # Basic configuration
+  externalLabels:
+    cluster: "stress-tests-eks"
+    region: "us-west-2"
+  scrapeInterval: 30s  # Increased interval to reduce load
+  
+  # Resource limits to prevent OOM
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "50m"
+    limits:
+      memory: "512Mi"
+      cpu: "200m"
+  
+  # Storage configuration
+  storage:
+    emptyDir:
+      sizeLimit: 5Gi
+  
+  # Simplified remote write configuration
+  remoteWrite:
+  - url: "http://10.0.3.115:9090/api/v1/write"
+    # Conservative queue settings
+    queueConfig:
+      capacity: 5000
+      maxShards: 10
+      minShards: 1
+      maxSamplesPerSend: 1000
+      batchSendDeadline: 10s
+    # Simplified write relabel configs
+    writeRelabelConfigs:
+      # Add cluster label
+      - targetLabel: cluster
+        replacement: "stress-tests-eks"
+        action: replace
+
+---
+# ServiceAccount (unchanged)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus-agent
+  namespace: monitoring
+---
+# ClusterRole (unchanged)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-agent-scrape
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/proxy
+      - services
+      - endpoints
+      - pods
+      - namespaces
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources:
+      - nodes/metrics
+      - nodes/stats
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs:
+      - /metrics
+      - /metrics/cadvisor
+      - /metrics/resource
+    verbs: ["get"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources:
+      - servicemonitors
+      - podmonitors
+      - prometheusrules
+      - probes
+    verbs: ["get", "list", "watch"]
+---
+# ClusterRoleBinding (unchanged)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-agent-scrape
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-agent-scrape
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-agent
+    namespace: monitoring
+---
+# Simple ServiceMonitor for testing
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: prometheus-agent-self
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-agent
+  endpoints:
+    - port: web
+      interval: 30s
+      path: /metrics
