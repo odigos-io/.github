@@ -1,0 +1,328 @@
+# Fixed Prometheus Agent Configuration
+# This addresses common issues that cause "No data" in Grafana
+
+---
+# Prometheus Agent
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: PrometheusAgent
+metadata:
+  name: cluster-agent
+  namespace: monitoring
+spec:
+  serviceAccountName: prometheus-agent
+  serviceMonitorSelector:
+    matchLabels:
+      release: prometheus-agent
+  podMonitorSelector:
+    matchLabels:
+      release: prometheus-agent
+  serviceMonitorNamespaceSelector: {}
+  podMonitorNamespaceSelector: {}
+  probeSelector:
+    matchLabels:
+      release: prometheus-agent
+  scrapeInterval: 15s
+  # Add evaluation interval for rules
+  evaluationInterval: 15s
+  # Enable web interface for debugging
+  web:
+    pageTitle: "Prometheus Agent - stress-tests-eks"
+  # Add resource limits
+  resources:
+    requests:
+      memory: "400Mi"
+      cpu: "100m"
+    limits:
+      memory: "800Mi"
+      cpu: "200m"
+  remoteWrite:
+  - url: "http://10.0.3.115:9090/api/v1/write"
+    # Add timeout and retry settings
+    remoteTimeout: 30s
+    queueConfig:
+      capacity: 10000
+      maxShards: 200
+      minShards: 1
+      maxSamplesPerSend: 2000
+      batchSendDeadline: 5s
+    # Simplified relabel config for initial testing
+    writeRelabelConfigs:
+      # Add cluster identity
+      - targetLabel: cluster
+        replacement: "stress-tests-eks"
+      # Keep important labels as-is initially
+      # Comment out aggressive relabeling for debugging
+
+---
+# ServiceAccount (unchanged)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus-agent
+  namespace: monitoring
+
+---
+# Enhanced ClusterRole with additional permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-agent-scrape
+rules:
+  - apiGroups: [""]
+    resources: [nodes, nodes/proxy, services, endpoints, pods, namespaces]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: [nodes/metrics, nodes/stats, nodes/log, nodes/spec, nodes/proxy]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: [configmaps, secrets, persistentvolumes, persistentvolumeclaims]
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs:
+      - /metrics
+      - /metrics/cadvisor
+      - /metrics/resource
+      - /metrics/probes
+    verbs: ["get"]
+  - apiGroups: ["extensions", "networking.k8s.io"]
+    resources: [ingresses]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: [servicemonitors, podmonitors, prometheusrules, probes]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: [storageclasses, volumeattachments]
+    verbs: ["get", "list", "watch"]
+
+---
+# ClusterRoleBinding (unchanged)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-agent-scrape
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-agent-scrape
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-agent
+    namespace: monitoring
+
+---
+# ServiceMonitor for Prometheus Agent itself (for debugging)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: prometheus-agent-self
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-agent
+  endpoints:
+    - port: web
+      interval: 15s
+      path: /metrics
+
+---
+# Fixed ServiceMonitor for kubelet + cadvisor + resource
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kubelet-metrics
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  # More flexible selector - try different label combinations
+  selector:
+    matchLabels:
+      k8s-app: kubelet
+  namespaceSelector:
+    matchNames: [kube-system]
+  endpoints:
+    # Standard kubelet metrics
+    - port: https-metrics
+      scheme: https
+      interval: 30s
+      honorLabels: true
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig: 
+        insecureSkipVerify: true
+    # cAdvisor metrics
+    - port: https-metrics
+      path: /metrics/cadvisor
+      scheme: https
+      interval: 30s
+      honorLabels: true
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig: 
+        insecureSkipVerify: true
+      # Simplified metric relabeling
+      metricRelabelings:
+      - sourceLabels: [__name__]
+        regex: 'container_cpu_usage_seconds_total|container_memory_usage_bytes|container_network_receive_bytes_total|container_network_transmit_bytes_total'
+        action: keep
+    # Resource metrics  
+    - port: https-metrics
+      path: /metrics/resource
+      scheme: https
+      interval: 30s
+      honorLabels: true
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig: 
+        insecureSkipVerify: true
+
+---
+# Alternative kubelet ServiceMonitor if the above doesn't work
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kubelet-alternative
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  # Try without selector first
+  namespaceSelector:
+    matchNames: [kube-system]
+  selector: {}
+  endpoints:
+    - targetPort: 10250
+      scheme: https
+      interval: 30s
+      path: /metrics
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig: 
+        insecureSkipVerify: true
+
+---
+# ServiceMonitor for kube-state-metrics with fallback namespaces
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kube-state-metrics
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+  # Check both common namespaces
+  namespaceSelector:
+    matchNames: [kube-system, monitoring]
+  endpoints:
+    - port: http
+      interval: 30s
+      path: /metrics
+      honorLabels: true
+
+---
+# PodMonitor for node-exporter with more flexible selector
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: node-exporter-pods
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-node-exporter
+  namespaceSelector:
+    matchNames: [monitoring, kube-system]
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      honorLabels: true
+
+---
+# Simplified ServiceMonitor for API server
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: apiserver
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      component: apiserver
+      provider: kubernetes
+  namespaceSelector:
+    matchNames: [default]
+  endpoints:
+    - port: https
+      scheme: https
+      interval: 30s
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        caFile: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        insecureSkipVerify: false
+
+---
+# Debug ServiceMonitor - monitors a simple endpoint to verify basic functionality
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: debug-endpoint
+  namespace: monitoring
+  labels:
+    release: prometheus-agent
+spec:
+  selector:
+    matchLabels:
+      app: debug-metrics
+  endpoints:
+    - port: http
+      interval: 15s
+      path: /metrics
+
+---
+# Debug service to test basic scraping
+apiVersion: v1
+kind: Service
+metadata:
+  name: debug-metrics
+  namespace: monitoring
+  labels:
+    app: debug-metrics
+spec:
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  selector:
+    app: debug-metrics
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: debug-metrics
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: debug-metrics
+  template:
+    metadata:
+      labels:
+        app: debug-metrics
+    spec:
+      containers:
+      - name: debug-metrics
+        image: prom/node-exporter:latest
+        args:
+          - '--web.listen-address=:8080'
+          - '--path.rootfs=/host'
+        ports:
+        - containerPort: 8080
+          name: http
