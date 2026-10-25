@@ -7,5 +7,11 @@ issuer: https://token.actions.githubusercontent.com
 subject_pattern: repo:odigos-io(@84347062)?/odigos-enterprise(@683608086)?:ref:refs/heads/main
 claim_pattern:
   job_workflow_ref: odigos-io/odigos-enterprise/\.github/workflows/(generate-onprem-token|onprem-token-reminders)\.yml@refs/heads/main
+# The token is restricted to odigos-enterprise; the org permission is unaffected
+# by the restriction. issues: read lets addProjectV2ItemById resolve the private
+# tracker issue it is adding to the project.
+repositories:
+  - odigos-enterprise
 permissions:
   organization_projects: write
+  issues: read
